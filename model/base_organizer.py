@@ -1,6 +1,7 @@
 from gradient_optimizers import GradientModel
 import theano, theano.tensor as T, numpy as np
 from collections import OrderedDict
+from .utils import number_of_branches_per_depth
 REAL = theano.config.floatX
 
 class OrganizerModel(GradientModel):
@@ -14,7 +15,7 @@ class OrganizerModel(GradientModel):
     
     """
     
-    def projection_function(self, indices, document_index):
+    def projection_function(self, indices, document_index, branch_index):
         """
         Project word using document into 2 classes
         using a bias vector.
@@ -22,30 +23,33 @@ class OrganizerModel(GradientModel):
         
         proj = T.dot(
                 self.model_matrix[indices],
-                self.document_matrix[document_index])
-        return T.nnet.softmax(proj + self.bias_vector)
+                self.document_matrix[document_index, branch_index])
+        return T.nnet.sigmoid(proj + self.bias_vector)
         
     def cost_function(self, projection, label):
         """
         Collect error by comparing the decision of the network
         with actual position of word in document.
         """
-        return T.nnet.categorical_crossentropy(projection, label)
+        return T.nnet.binary_crossentropy(projection, label)
         
     def _create_theano_variables(self):
         
         self.model_matrix = theano.shared(
-            np.random.randn(self.vocabulary_size, self.size).astype(REAL),
+            1./ self.size * np.random.randn(self.vocabulary_size, self.size).astype(REAL),
             name = 'model_matrix')
         
+        # document / branch / embedding
         self.document_matrix = theano.shared(
-            np.random.randn(self.document_size, self.size, 2).astype(REAL),
-            name = 'model_matrix')
+            1./ self.size * np.random.randn(self.document_size, number_of_branches_per_depth(self.tree_depth), self.size).astype(REAL),
+            name = 'document_matrix')
         
-        self.bias_vector = theano.shared(np.zeros(2, dtype = REAL), name='bias_vector')
+        self.bias_vector = theano.shared(np.float32(0.0), name='bias_vector')
         
         self.params.append(self.bias_vector)
         self.params.append(self.model_matrix)
+        self.params.append(self.document_matrix)
+
         self.indexed_params.add(self.model_matrix)
         self.document_indexed_params.add(self.document_matrix)
         
@@ -58,17 +62,19 @@ class OrganizerModel(GradientModel):
                  update_fun = True,
                  learning_rate = 0.035,
                  size = 50,
-                 tree_depth = 3,
+                 tree_depth = 2,
                  vocabulary_size = 5000,
                  document_size = 500,
                  update_function = 'adagradclipped'):
+
+        assert(tree_depth >= 0), "Tree depth must be non-negative."
         
         self.disconnected_inputs = disconnected_inputs
         self.theano_mode         = theano_mode
         self.store_max_updates   = store_max_updates
         self.size                = size
         self.vocabulary_size     = vocabulary_size
-        self.document_size       = (2 ** (tree_depth)) * document_size
+        self.document_size       = document_size
         self.tree_depth          = tree_depth
         self.learning_rate       = theano.shared(np.float32(learning_rate), name='learning_rate')
         setattr(self, 'params', [])
@@ -98,9 +104,10 @@ class OrganizerModel(GradientModel):
         self.clip_range      = theano.shared(np.float32(10))
         indices              = T.ivector('indices')
         document_index       = T.iscalar('document_index')
+        branch_index         = T.iscalar('branch_index')
         label                = T.ivector('labels')
         
-        class_projection     = self.projection_function(indices, document_index)
+        class_projection     = self.projection_function(indices, document_index, branch_index)
         
         cost                 = self.cost_function(class_projection, label).sum()
 
@@ -132,14 +139,14 @@ class OrganizerModel(GradientModel):
                 updates[param] = T.inc_subtensor(param[indices], - (self.learning_rate / T.sqrt(updates[self._additional_params[param]][indices])) * gparam)
             elif param in self.document_indexed_params:
                 # the statistic gets increased by the squared gradient:
-                updates[self._additional_params[param]] = T.inc_subtensor(self._additional_params[param][indices], gparam[document_index] ** 2)
+                updates[self._additional_params[param]] = T.inc_subtensor(self._additional_params[param][document_index, branch_index], gparam[document_index, branch_index] ** 2)
                 reset_updates[self._additional_params[param]] = T.ones_like(self._additional_params[param])
 
                 if self.store_max_updates:
-                    updates[self.max_update_size] = T.set_subtensor(updates[self.max_update_size][i], T.maximum(self.max_update_size[i], gparam[document_index].max()))
-                gparam = T.clip(gparam[document_index], -self.clip_range, self.clip_range)
+                    updates[self.max_update_size] = T.set_subtensor(updates[self.max_update_size][i], T.maximum(self.max_update_size[i], gparam[document_index, branch_index].max()))
+                gparam = T.clip(gparam[document_index, branch_index], -self.clip_range, self.clip_range)
                 # this normalizes the learning rate:
-                updates[param] = T.inc_subtensor(param[document_index], - (self.learning_rate / T.sqrt(updates[self._additional_params[param]][document_index])) * gparam)
+                updates[param] = T.inc_subtensor(param[document_index, branch_index], - (self.learning_rate / T.sqrt(updates[self._additional_params[param]][document_index, branch_index])) * gparam)
             else:
                 # the statistic gets increased by the squared gradient:
                 updates[self._additional_params[param]] = self._additional_params[param] + (gparam ** 2)
@@ -153,5 +160,5 @@ class OrganizerModel(GradientModel):
 
             i+=1
 
-        self.update_fun      = theano.function([indices, document_index, label], cost, updates = updates, mode = self.theano_mode)
+        self.update_fun      = theano.function([indices, document_index, branch_index, label], cost, updates = updates, mode = self.theano_mode)
         self.reset_adagrad   = theano.function([], updates = reset_updates, mode = self.theano_mode)
