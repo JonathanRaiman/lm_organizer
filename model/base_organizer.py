@@ -22,7 +22,7 @@ class OrganizerModel(GradientModel):
         """
         
         proj = T.dot(
-                self.model_matrix[indices],
+                self.model_matrix[indices].mean(axis=0),
                 self.document_matrix[document_index, branch_index])
         return T.nnet.sigmoid(proj + self.bias_vector)
         

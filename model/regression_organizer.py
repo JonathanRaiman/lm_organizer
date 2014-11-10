@@ -13,10 +13,6 @@ class BiasOrganizerModel(OrganizerModel):
 	
 	"""
 
-	def __init__(self, sum_words = False, **kwargs):
-		self.sum_words = sum_words
-		super().__init__(**kwargs)
-
 	def _create_theano_variables(self):
 		super()._create_theano_variables()
 
@@ -34,7 +30,7 @@ class BiasOrganizerModel(OrganizerModel):
 
 	def projection_function(self, indices, document_index, branch_index):
 		proj_mat = self.document_matrix[document_index, branch_index] * self.projection_matrix
-		word_mat = self.model_matrix[indices].sum(axis=0) if self.sum_words else self.model_matrix[indices]
+		word_mat = self.model_matrix[indices].mean(axis=0)
 		proj = T.dot(
 				word_mat,
 				proj_mat
